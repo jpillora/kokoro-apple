@@ -11,8 +11,11 @@ let package = Package(
   products: [
     .library(
       name: "KokoroSwift",
-      type: .dynamic,
       targets: ["KokoroSwift"]
+    ),
+    .executable(
+      name: "KokoroDemo",
+      targets: ["KokoroDemo"]
     ),
   ],
   dependencies: [
@@ -39,6 +42,10 @@ let package = Package(
     ),
     .testTarget(
       name: "KokoroSwiftTests",
+      dependencies: ["KokoroSwift"]
+    ),
+    .executableTarget(
+      name: "KokoroDemo",
       dependencies: ["KokoroSwift"]
     ),
   ]
