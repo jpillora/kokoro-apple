@@ -21,7 +21,9 @@ let package = Package(
   dependencies: [
     .package(url: "https://github.com/ml-explore/mlx-swift", exact: "0.30.2"),
     // .package(url: "https://github.com/mlalma/eSpeakNGSwift", from: "1.0.1"),
-    .package(url: "https://github.com/mlalma/MisakiSwift", exact: "1.0.6"),
+    // Fork of mlalma/MisakiSwift 1.0.6 with the library built static (no
+    // type: .dynamic) so MLX links once when embedded in an iOS app.
+    .package(url: "https://github.com/jpillora/MisakiSwift", branch: "kokoro-ios"),
     .package(url: "https://github.com/mlalma/MLXUtilsLibrary.git", exact: "0.0.6")
   ],
   targets: [
