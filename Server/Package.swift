@@ -15,6 +15,7 @@ let package = Package(
     .package(name: "KokoroSwift", path: ".."),
     .package(url: "https://github.com/ml-explore/mlx-swift", exact: "0.30.2"),
     .package(url: "https://github.com/mlalma/MLXUtilsLibrary.git", exact: "0.0.6"),
+    .package(url: "https://github.com/swhitty/FlyingFox.git", from: "0.26.0"),
   ],
   targets: [
     // Helpers shared by the demo and the server (voice loading, text
@@ -31,6 +32,15 @@ let package = Package(
       dependencies: [
         "KokoroKit",
         .product(name: "KokoroSwift", package: "KokoroSwift"),
+        .product(name: "MLX", package: "mlx-swift"),
+      ]
+    ),
+    .executableTarget(
+      name: "KokoroServer",
+      dependencies: [
+        "KokoroKit",
+        .product(name: "KokoroSwift", package: "KokoroSwift"),
+        .product(name: "FlyingFox", package: "FlyingFox"),
         .product(name: "MLX", package: "mlx-swift"),
       ]
     ),
