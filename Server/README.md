@@ -72,6 +72,15 @@ swift run -c release KokoroDemo   # writes /tmp/kubla-khan.wav
 
 Extra env vars: `KOKORO_TEXT`, `KOKORO_TEXT_FILE`, `KOKORO_OUTPUT_PATH`.
 
+## Releasing
+
+`./release.sh <tag>` builds the release binary, bundles it with the metallib
+and README into `dist/kokoro-server-<tag>-macos-arm64.tar.gz`, and uploads it
+to the GitHub release for `<tag>` (created on `main` if missing, assets
+replaced if it exists). Prefer non-semver tags like `server-v0.1.0` so SwiftPM
+never treats them as package versions. Use `--dry-run` to build and stage
+without publishing.
+
 ## Building a distributable binary
 
 Everything (MLX, MisakiSwift, KokoroSwift) links statically into one binary;
