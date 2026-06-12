@@ -1,15 +1,13 @@
-//
-//  Kokoro-tts-lib
-//
 import Foundation
 import MLX
 import MLXUtilsLibrary
 
-/// Loads voice embeddings from a `.npz` file shipped with the Kokoro test app.
+/// Loads voice embeddings from a `voices.npz` archive.
 ///
-/// The `voices.npz` archive contains one `.npy` array per voice (e.g. `bm_fable.npy`).
-/// Use `VoiceLoader.load(from:name:)` to read a specific voice embedding for use
-/// with `KokoroTTS.generateAudio(voice:language:text:)`.
+/// The archive contains one `.npy` array per voice (e.g. `bm_fable.npy`).
+/// Use `load(from:name:)` to read a single voice embedding, or
+/// `loadAll(from:)` to read every voice, for use with
+/// `KokoroTTS.generateAudio(voice:language:text:)`.
 public enum VoiceLoader {
   public enum Error: Swift.Error {
     case fileNotReadable(URL)
@@ -29,5 +27,16 @@ public enum VoiceLoader {
       throw Error.voiceNotFound(name)
     }
     return voice
+  }
+
+  /// Loads every voice embedding in a `voices.npz` archive, keyed by voice
+  /// name with the `.npy` suffix stripped.
+  public static func loadAll(from url: URL) throws -> [String: MLXArray] {
+    guard let voices = NpyzReader.read(fileFromPath: url) else {
+      throw Error.fileNotReadable(url)
+    }
+    return Dictionary(uniqueKeysWithValues: voices.map { key, value in
+      (key.hasSuffix(".npy") ? String(key.dropLast(4)) : key, value)
+    })
   }
 }

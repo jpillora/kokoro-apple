@@ -13,10 +13,6 @@ let package = Package(
       name: "KokoroSwift",
       targets: ["KokoroSwift"]
     ),
-    .executable(
-      name: "KokoroDemo",
-      targets: ["KokoroDemo"]
-    ),
   ],
   dependencies: [
     .package(url: "https://github.com/ml-explore/mlx-swift", exact: "0.30.2"),
@@ -44,10 +40,6 @@ let package = Package(
     ),
     .testTarget(
       name: "KokoroSwiftTests",
-      dependencies: ["KokoroSwift"]
-    ),
-    .executableTarget(
-      name: "KokoroDemo",
       dependencies: ["KokoroSwift"]
     ),
   ]

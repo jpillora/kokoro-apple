@@ -1,4 +1,5 @@
 import Foundation
+import KokoroKit
 import KokoroSwift
 import MLX
 
@@ -49,36 +50,7 @@ if let textFile = env["KOKORO_TEXT_FILE"], let contents = try? String(contentsOf
 print("Initializing Kokoro TTS...")
 let tts = KokoroTTS(modelPath: URL(fileURLWithPath: modelPath), g2p: .misaki)
 
-// Split text into chunks small enough to fit in Kokoro's 510-token limit.
-// Strategy: split on sentence boundaries, then greedily pack ~40 words per chunk.
-func splitIntoChunks(_ text: String, maxWordsPerChunk: Int = 40) -> [String] {
-  let paragraphs = text.components(separatedBy: "\n\n")
-    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-    .filter { !$0.isEmpty }
-
-  var chunks: [String] = []
-  for paragraph in paragraphs {
-    let sentences = paragraph.split(whereSeparator: { ".!?".contains($0) })
-      .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-      .filter { !$0.isEmpty }
-    var current = ""
-    var currentWords = 0
-    for sentence in sentences {
-      let words = sentence.split(separator: " ").count
-      if currentWords + words > maxWordsPerChunk, !current.isEmpty {
-        chunks.append(current)
-        current = ""
-        currentWords = 0
-      }
-      current = current.isEmpty ? sentence + "." : current + " " + sentence + "."
-      currentWords += words
-    }
-    if !current.isEmpty { chunks.append(current) }
-  }
-  return chunks
-}
-
-let chunks = splitIntoChunks(poem)
+let chunks = TextChunker.split(poem)
 
 print("Generating audio (voice: \(voiceName), lang: \(language.rawValue), chunks: \(chunks.count))...")
 let silenceBetweenChunks = [Float](repeating: 0, count: KokoroTTS.Constants.samplingRate / 2)
@@ -95,11 +67,8 @@ guard !samples.isEmpty else {
   exit(1)
 }
 
-try AudioUtils.writeWavFile(
-  samples: samples,
-  sampleRate: Double(KokoroTTS.Constants.samplingRate),
-  fileURL: URL(fileURLWithPath: outputPath)
-)
+let wav = WavEncoder.encode(samples: samples, sampleRate: KokoroTTS.Constants.samplingRate)
+try wav.write(to: URL(fileURLWithPath: outputPath))
 
 let durationSeconds = Double(samples.count) / Double(KokoroTTS.Constants.samplingRate)
 print("Wrote \(samples.count) samples (\(String(format: "%.2f", durationSeconds))s) to \(outputPath)")
