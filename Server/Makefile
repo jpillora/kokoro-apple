@@ -28,14 +28,19 @@ server: dev
 demo: dev
 	.build/debug/KokoroDemo
 
-# Self-contained distributable: binary + metallib side by side.
+# Embed the GPU kernels into the binary as a Mach-O section; the server
+# extracts them to ~/.local/state/kokoro-apple at runtime when no
+# colocated metallib is found.
+EMBED := -Xlinker -sectcreate -Xlinker __DATA -Xlinker __mlx_metallib \
+         -Xlinker .build/release/mlx.metallib
+
+# Self-contained distributable: single binary, kernels embedded.
 dist:
 	$(MAKE) metallib
-	swift build -c release --product KokoroServer
+	swift build -c release --product KokoroServer $(EMBED)
 	mkdir -p dist
 	cp .build/release/KokoroServer dist/kokoro-server
-	cp $(METALLIB) dist/mlx.metallib
-	@echo "dist/kokoro-server ready (keep mlx.metallib next to it)"
+	@echo "dist/kokoro-server ready (self-contained)"
 
 clean:
 	rm -rf .build $(DD) dist

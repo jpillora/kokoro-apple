@@ -74,33 +74,36 @@ Extra env vars: `KOKORO_TEXT`, `KOKORO_TEXT_FILE`, `KOKORO_OUTPUT_PATH`.
 
 ## Releasing
 
-`./release.sh <tag>` builds the release binary, bundles it with the metallib
-and README into `dist/kokoro-server-<tag>-macos-arm64.tar.gz`, and uploads it
-to the GitHub release for `<tag>` (created on `main` if missing, assets
-replaced if it exists). Prefer non-semver tags like `server-v0.1.0` so SwiftPM
-never treats them as package versions. Use `--dry-run` to build and stage
-without publishing.
+`./release.sh <tag>` builds the self-contained binary (GPU kernels embedded)
+and uploads `kokoro-server-macos-arm64` plus a `.sha256` to the GitHub
+release for `<tag>` (created on `main` if missing, assets replaced if it
+exists). Prefer non-semver tags like `server-v0.1.0` so SwiftPM never treats
+them as package versions. Use `--dry-run` to build and stage without
+publishing.
 
 ## Building a distributable binary
 
-Everything (MLX, MisakiSwift, KokoroSwift) links statically into one binary;
-only the Metal shader library rides alongside as a file:
+Everything (MLX, MisakiSwift, KokoroSwift) links statically into one binary,
+and the Metal shader library is embedded as a Mach-O section — the result is
+fully self-contained:
 
 ```sh
 cd Server
-make dist
-# → dist/kokoro-server + dist/mlx.metallib (keep them side by side)
+make dist   # → dist/kokoro-server
 ```
+
+On startup the binary extracts the GPU kernels to
+`$XDG_STATE_HOME/kokoro-apple` (default `~/.local/state/kokoro-apple`) unless
+it finds an `mlx.metallib` next to itself (the dev-build layout), and reuses
+the extraction on later runs.
 
 ## Installing a release
 
-Both files from the tarball must land in the same directory — the binary can
-be renamed, but `mlx.metallib` must keep its name. Without it the server
-exits at startup with instructions. No sudo needed with `~/.local/bin`:
+Single file; rename it whatever you like:
 
 ```sh
-tar -xzf kokoro-server-*-macos-arm64.tar.gz
-cd kokoro-server-*-macos-arm64
-cp kokoro-server mlx.metallib ~/.local/bin/
-kokoro-server --help
+curl -L -o ~/.local/bin/kokoro-apple \
+  https://github.com/jpillora/kokoro-apple/releases/latest/download/kokoro-server-macos-arm64
+chmod +x ~/.local/bin/kokoro-apple
+kokoro-apple --help
 ```

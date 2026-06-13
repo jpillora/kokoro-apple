@@ -46,26 +46,27 @@ REPO=$(git remote get-url origin | sed -E 's#^(git@github.com:|https://github.co
 
 echo "==> building assets for $TAG (repo: $REPO)"
 make metallib
-swift build -c release --product KokoroServer
+swift build -c release --product KokoroServer \
+  -Xlinker -sectcreate -Xlinker __DATA -Xlinker __mlx_metallib \
+  -Xlinker .build/release/mlx.metallib
 
-# Asset name embeds the tag, minus a redundant server prefix
-# (tag server-v0.1.0 -> kokoro-server-v0.1.0-macos-arm64).
-BASE="${TAG#kokoro-server-}"
-BASE="${BASE#server-}"
-NAME="kokoro-server-${BASE//\//-}-macos-arm64"
-STAGE="dist/$NAME"
-TARBALL="dist/$NAME.tar.gz"
-rm -rf "$STAGE" "$TARBALL"
-mkdir -p "$STAGE"
-cp .build/release/KokoroServer "$STAGE/kokoro-server"
-cp .build/release/mlx.metallib "$STAGE/mlx.metallib"
-cp README.md "$STAGE/README.md"
-tar -czf "$TARBALL" -C dist "$NAME"
-shasum -a 256 "$TARBALL" | awk '{ print $1 }' > "$TARBALL.sha256"
+# The published binary must be self-contained: verify the kernels section.
+if ! otool -l .build/release/KokoroServer | grep -q __mlx_metallib; then
+  echo "embedded metallib section missing from the binary" >&2
+  exit 1
+fi
+
+# Stable asset name (releases are tag-scoped) so the
+# releases/latest/download URL never changes.
+NAME="kokoro-server-macos-arm64"
+BIN="dist/$NAME"
+mkdir -p dist
+cp .build/release/KokoroServer "$BIN"
+shasum -a 256 "$BIN" | awk '{ print $1 }' > "$BIN.sha256"
 
 echo "==> staged assets:"
-ls -lh "$TARBALL" "$TARBALL.sha256"
-echo "    sha256: $(cat "$TARBALL.sha256")"
+ls -lh "$BIN" "$BIN.sha256"
+echo "    sha256: $(cat "$BIN.sha256")"
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
   echo "==> dry run: skipping upload of $TAG to $REPO"
@@ -74,7 +75,7 @@ fi
 
 if gh release view "$TAG" --repo "$REPO" > /dev/null 2>&1; then
   echo "==> uploading to existing release $TAG"
-  gh release upload "$TAG" "$TARBALL" "$TARBALL.sha256" --clobber --repo "$REPO"
+  gh release upload "$TAG" "$BIN" "$BIN.sha256" --clobber --repo "$REPO"
 else
   # Creating a release mints the tag — make sure it lands on a published commit.
   if [[ -n "$(git status --porcelain)" ]]; then
@@ -87,7 +88,7 @@ else
     exit 1
   fi
   echo "==> creating release $TAG"
-  gh release create "$TAG" "$TARBALL" "$TARBALL.sha256" \
+  gh release create "$TAG" "$BIN" "$BIN.sha256" \
     --repo "$REPO" \
     --target main \
     --generate-notes

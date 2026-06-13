@@ -2,6 +2,7 @@ import FlyingFox
 import Foundation
 import KokoroKit
 import KokoroSwift
+import MachO
 import MLX
 
 struct TTSParams: Decodable {
@@ -72,21 +73,25 @@ struct KokoroServerMain {
     POST /tts      {"text":"...","voice":"bm_fable","speed":1.0} -> audio/wav
     GET  /tts?text=...&voice=...&speed=...                       -> audio/wav
 
-  mlx.metallib (the MLX GPU kernels, shipped in the release tarball) must sit
-  in the same directory as this binary.
+  Release binaries embed the MLX GPU kernels and extract them to
+  $XDG_STATE_HOME/kokoro-apple (default ~/.local/state/kokoro-apple) on first
+  run. Development builds instead need mlx.metallib next to the binary
+  (see `make metallib`).
   """
 
-  /// MLX loads its GPU kernels at runtime from `mlx.metallib` next to the
-  /// executable (or a `mlx-swift_Cmlx.bundle` for Xcode-built apps). Check
-  /// up front so a stray binary fails with instructions instead of MLX's
-  /// "Failed to load the default metallib" abort.
-  static func metallibProblem() -> String? {
+  /// MLX loads its GPU kernels (a `.metallib`) at runtime; it searches for
+  /// `mlx.metallib` next to the executable, then a `mlx-swift_Cmlx.bundle`
+  /// (Xcode-built apps), and finally `default.metallib` relative to the
+  /// working directory. Release binaries embed the metallib in a Mach-O
+  /// section; when nothing is discoverable in place we extract it to the
+  /// state dir and chdir there so MLX's working-directory fallback finds it.
+  static func ensureMetallib(env: [String: String]) -> String? {
     let fm = FileManager.default
     guard let exe = Bundle.main.executableURL?.resolvingSymlinksInPath() else { return nil }
-    let dir = exe.deletingLastPathComponent()
+    let exeDir = exe.deletingLastPathComponent()
     var candidates = [
-      dir.appendingPathComponent("mlx.metallib"),
-      dir.appendingPathComponent("mlx-swift_Cmlx.bundle"),
+      exeDir.appendingPathComponent("mlx.metallib"),
+      exeDir.appendingPathComponent("mlx-swift_Cmlx.bundle"),
     ]
     if let resources = Bundle.main.resourceURL {
       candidates.append(resources.appendingPathComponent("mlx-swift_Cmlx.bundle"))
@@ -94,13 +99,63 @@ struct KokoroServerMain {
     if candidates.contains(where: { fm.fileExists(atPath: $0.path) }) {
       return nil
     }
-    return """
-    Missing mlx.metallib (the MLX GPU kernels): expected next to this binary at
-      \(dir.path)/mlx.metallib
-    The release tarball ships it alongside kokoro-server — keep both files in
-    the same directory:
-      cp mlx.metallib '\(dir.path)/'
-    """
+
+    guard let embedded = embeddedMetallib() else {
+      return """
+      Missing mlx.metallib (the MLX GPU kernels): expected next to this binary at
+        \(exeDir.path)/mlx.metallib
+      This binary has none embedded (development build?) — either keep
+      mlx.metallib beside it, or use a release binary, which embeds the
+      kernels and extracts them to ~/.local/state/kokoro-apple on first run.
+      """
+    }
+
+    let stateHome = env["XDG_STATE_HOME"].map { URL(fileURLWithPath: $0) }
+      ?? fm.homeDirectoryForCurrentUser.appendingPathComponent(".local/state")
+    let stateDir = stateHome.appendingPathComponent("kokoro-apple")
+    let lib = stateDir.appendingPathComponent("mlx.metallib")
+    // MLX's working-directory fallback looks for this exact name.
+    let alias = stateDir.appendingPathComponent("default.metallib")
+    do {
+      try fm.createDirectory(at: stateDir, withIntermediateDirectories: true)
+      if (try? Data(contentsOf: lib)) != embedded {
+        let tmp = stateDir.appendingPathComponent("mlx.metallib.tmp-\(getpid())")
+        try embedded.write(to: tmp)
+        if fm.fileExists(atPath: lib.path) {
+          try fm.removeItem(at: lib)
+        }
+        try fm.moveItem(at: tmp, to: lib)
+        print("Extracted embedded GPU kernels to \(lib.path)")
+      }
+      if (try? fm.destinationOfSymbolicLink(atPath: alias.path)) != "mlx.metallib" {
+        try? fm.removeItem(at: alias)
+        try fm.createSymbolicLink(atPath: alias.path, withDestinationPath: "mlx.metallib")
+      }
+    } catch {
+      return "Failed to extract embedded GPU kernels to \(stateDir.path): \(error)"
+    }
+    guard fm.changeCurrentDirectoryPath(stateDir.path) else {
+      return "Failed to change working directory to \(stateDir.path)"
+    }
+    print("Using GPU kernels from \(lib.path)")
+    return nil
+  }
+
+  /// Reads the metallib that release.sh links into the binary via
+  /// `-sectcreate __DATA __mlx_metallib`.
+  static func embeddedMetallib() -> Data? {
+    for i in 0 ..< _dyld_image_count() {
+      guard let header = _dyld_get_image_header(i), header.pointee.filetype == MH_EXECUTE else {
+        continue
+      }
+      var size: UInt = 0
+      let header64 = UnsafeRawPointer(header).assumingMemoryBound(to: mach_header_64.self)
+      guard let bytes = getsectiondata(header64, "__DATA", "__mlx_metallib", &size), size > 0 else {
+        return nil
+      }
+      return Data(bytes: bytes, count: Int(size))
+    }
+    return nil
   }
 
   static func main() async throws {
@@ -121,27 +176,29 @@ struct KokoroServerMain {
     let port = UInt16(env["KOKORO_PORT"] ?? "8080") ?? 8080
     let defaultVoice = env["KOKORO_VOICE"] ?? "bm_fable"
 
+    // Resolve against the original working directory now: ensureMetallib()
+    // may chdir to the state dir before MLX initializes.
+    let modelURL = URL(fileURLWithPath: modelPath).standardizedFileURL
+    let voicesURL = URL(fileURLWithPath: voicesPath).standardizedFileURL
+
     let fm = FileManager.default
-    guard fm.fileExists(atPath: modelPath) else {
-      fputs("Missing model at \(modelPath) (set KOKORO_MODEL_PATH)\n", stderr)
-      fputs("Download with:\n  curl -L -o '\(modelPath)' 'https://huggingface.co/prince-canuma/Kokoro-82M/resolve/main/kokoro-v1_0.safetensors'\n", stderr)
+    guard fm.fileExists(atPath: modelURL.path) else {
+      fputs("Missing model at \(modelURL.path) (set KOKORO_MODEL_PATH)\n", stderr)
+      fputs("Download with:\n  curl -L -o '\(modelURL.path)' 'https://huggingface.co/prince-canuma/Kokoro-82M/resolve/main/kokoro-v1_0.safetensors'\n", stderr)
       exit(1)
     }
-    guard fm.fileExists(atPath: voicesPath) else {
-      fputs("Missing voices.npz at \(voicesPath) (set KOKORO_VOICES_PATH)\n", stderr)
+    guard fm.fileExists(atPath: voicesURL.path) else {
+      fputs("Missing voices.npz at \(voicesURL.path) (set KOKORO_VOICES_PATH)\n", stderr)
       exit(1)
     }
 
-    if let problem = metallibProblem() {
+    if let problem = ensureMetallib(env: env) {
       fputs(problem + "\n", stderr)
       exit(1)
     }
 
     print("Loading model and voices...")
-    let synthesizer = try Synthesizer(
-      modelPath: URL(fileURLWithPath: modelPath),
-      voicesPath: URL(fileURLWithPath: voicesPath)
-    )
+    let synthesizer = try Synthesizer(modelPath: modelURL, voicesPath: voicesURL)
     guard let warmVoice = synthesizer.voiceNames.contains(defaultVoice)
       ? defaultVoice : synthesizer.voiceNames.first
     else {
