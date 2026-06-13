@@ -114,12 +114,16 @@ struct KokoroServerMain {
       var buffer = Data(capacity: 1 << 20)
       var written: Int64 = 0
       var lastBucket = -1
+      func flush() throws {
+        guard !buffer.isEmpty else { return }
+        try handle.write(contentsOf: buffer)
+        written += Int64(buffer.count)
+        buffer.removeAll(keepingCapacity: true)
+      }
       for try await byte in bytes {
         buffer.append(byte)
         if buffer.count >= 1 << 20 {
-          try handle.write(contentsOf: buffer)
-          written += Int64(buffer.count)
-          buffer.removeAll(keepingCapacity: true)
+          try flush()
           // Progress every 5% (or every 32 MB when the size is unknown).
           let bucket = expected > 0 ? Int(written * 20 / expected) : Int(written >> 25)
           if bucket != lastBucket {
@@ -129,17 +133,24 @@ struct KokoroServerMain {
           }
         }
       }
-      try handle.write(contentsOf: buffer)
+      try flush()
       try handle.close()
+      // Guard against a silently truncated stream (a dropped connection can
+      // end the byte sequence without throwing): a short-but-loadable model
+      // produces garbage audio rather than a clean error.
+      if expected > 0, written != expected {
+        throw NSError(domain: "kokoro", code: 1, userInfo: [NSLocalizedDescriptionKey:
+          "truncated download — got \(written) of \(expected) bytes"])
+      }
       if fm.fileExists(atPath: dest.path) {
         try fm.removeItem(at: dest)
       }
       try fm.moveItem(at: tmp, to: dest)
-      print("Downloaded \(label)")
+      print("Downloaded \(label) (\(written) bytes)")
     } catch {
       try? fm.removeItem(at: tmp)
       fputs("Failed to download \(label): \(error.localizedDescription)\n", stderr)
-      fputs("Fetch it manually:\n  curl -L -o '\(dest.path)' '\(source.absoluteString)'\n", stderr)
+      fputs("Re-run to retry, or fetch manually:\n  curl -L -o '\(dest.path)' '\(source.absoluteString)'\n", stderr)
       exit(1)
     }
   }
@@ -160,7 +171,7 @@ struct KokoroServerMain {
     let hasKernels = fm.fileExists(atPath: exeDir.appendingPathComponent("mlx.metallib").path)
       || fm.fileExists(atPath: exeDir.appendingPathComponent("mlx-swift_Cmlx.bundle").path)
     if hasBundles, hasKernels {
-      return nil
+      return finalizeColocated(exeDir: exeDir, fm: fm)
     }
 
     guard let archive = embeddedResources() else {
@@ -207,14 +218,36 @@ struct KokoroServerMain {
       }
       if exeDir.standardizedFileURL != stateDir.standardizedFileURL {
         var argv = CommandLine.arguments.map { strdup($0) }
+        argv[0] = strdup(target.path) // argv[0] should reflect the real exec path
         argv.append(nil)
         execv(target.path, argv)
         return "Failed to re-exec \(target.path): \(String(cString: strerror(errno)))"
       }
-      return nil
+      return finalizeColocated(exeDir: stateDir, fm: fm)
     } catch {
       return "Failed to set up resources in \(stateDir.path): \(error)"
     }
+  }
+
+  /// Once resources are colocated with the executable, make MLX's kernel
+  /// discovery robust: symlink `default.metallib` -> `mlx.metallib` and chdir
+  /// here. MLX's last-resort lookup loads `default.metallib` relative to the
+  /// working directory, which works even when its colocated-by-exec-path
+  /// lookup misfires — as it did intermittently right after a re-exec,
+  /// causing a "Failed to load the default metallib" crash on first run.
+  static func finalizeColocated(exeDir: URL, fm: FileManager) -> String? {
+    let metallib = exeDir.appendingPathComponent("mlx.metallib")
+    if fm.fileExists(atPath: metallib.path) {
+      let alias = exeDir.appendingPathComponent("default.metallib")
+      if (try? fm.destinationOfSymbolicLink(atPath: alias.path)) != "mlx.metallib" {
+        try? fm.removeItem(at: alias)
+        try? fm.createSymbolicLink(atPath: alias.path, withDestinationPath: "mlx.metallib")
+      }
+    }
+    guard fm.changeCurrentDirectoryPath(exeDir.path) else {
+      return "Failed to set working directory to \(exeDir.path)"
+    }
+    return nil
   }
 
   static func isSameFile(_ a: String, _ b: String) -> Bool {
@@ -259,14 +292,6 @@ struct KokoroServerMain {
     }
 
     let env = ProcessInfo.processInfo.environment
-
-    // May extract embedded resources and re-exec from the state dir; do it
-    // before anything else so the re-exec'd process repeats minimal work.
-    if let problem = ensureResources(env: env) {
-      fputs(problem + "\n", stderr)
-      exit(1)
-    }
-
     let state = stateDir(env: env)
     let modelPath = env["KOKORO_MODEL_PATH"]
       ?? state.appendingPathComponent("kokoro-v1_0.safetensors").path
@@ -276,8 +301,16 @@ struct KokoroServerMain {
     let port = UInt16(env["KOKORO_PORT"] ?? "8080") ?? 8080
     let defaultVoice = env["KOKORO_VOICE"] ?? "bm_fable"
 
-    let modelURL = URL(fileURLWithPath: modelPath).standardizedFileURL
-    let voicesURL = URL(fileURLWithPath: voicesPath).standardizedFileURL
+    // Absolutize now, against the launch cwd, before ensureResources may chdir.
+    let modelURL = URL(fileURLWithPath: modelPath).standardizedFileURL.absoluteURL
+    let voicesURL = URL(fileURLWithPath: voicesPath).standardizedFileURL.absoluteURL
+
+    // May extract embedded resources and re-exec from the state dir; do it
+    // before loading anything so the re-exec'd process repeats minimal work.
+    if let problem = ensureResources(env: env) {
+      fputs(problem + "\n", stderr)
+      exit(1)
+    }
 
     await ensureDownloaded("model (327 MB)", to: modelURL, from: modelSource)
     await ensureDownloaded("voices (15 MB)", to: voicesURL, from: voicesSource)
