@@ -28,18 +28,28 @@ server: dev
 demo: dev
 	.build/debug/KokoroDemo
 
-# Embed the GPU kernels into the binary as a Mach-O section; the server
-# extracts them to ~/.local/state/kokoro-apple at runtime when no
-# colocated metallib is found.
-EMBED := -Xlinker -sectcreate -Xlinker __DATA -Xlinker __mlx_metallib \
-         -Xlinker .build/release/mlx.metallib
+# Everything the binary needs beside it at runtime (SwiftPM resource
+# bundles: model config + G2P dictionaries, plus the GPU kernels) gets
+# tarred up and embedded as a Mach-O section; the server extracts it to
+# ~/.local/state/kokoro-apple and re-execs from there.
+EMBED := -Xlinker -sectcreate -Xlinker __DATA -Xlinker __kokoro_res \
+         -Xlinker .build/release/kokoro-resources.tgz
 
-# Self-contained distributable: single binary, kernels embedded.
+# Self-contained distributable: single binary, resources embedded.
+# Two passes: the first build produces the resource bundles, the second
+# relinks with the archive of them embedded.
 dist:
 	$(MAKE) metallib
+	swift build -c release --product KokoroServer
+	rm -f .build/release/kokoro-resources.tgz
+	cd .build/release && tar -czf kokoro-resources.tgz *.bundle mlx.metallib
 	swift build -c release --product KokoroServer $(EMBED)
 	mkdir -p dist
 	cp .build/release/KokoroServer dist/kokoro-server
+	# Replace the linker's minimal ad-hoc signature: the kernel SIGKILLs
+	# linker-signed binaries after the embed relink, despite codesign
+	# --verify passing.
+	codesign -f -s - dist/kokoro-server
 	@echo "dist/kokoro-server ready (self-contained)"
 
 clean:

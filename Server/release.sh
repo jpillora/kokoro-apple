@@ -45,14 +45,11 @@ fi
 REPO=$(git remote get-url origin | sed -E 's#^(git@github.com:|https://github.com/)##; s#\.git$##')
 
 echo "==> building assets for $TAG (repo: $REPO)"
-make metallib
-swift build -c release --product KokoroServer \
-  -Xlinker -sectcreate -Xlinker __DATA -Xlinker __mlx_metallib \
-  -Xlinker .build/release/mlx.metallib
+make dist
 
-# The published binary must be self-contained: verify the kernels section.
-if ! otool -l .build/release/KokoroServer | grep -q __mlx_metallib; then
-  echo "embedded metallib section missing from the binary" >&2
+# The published binary must be self-contained: verify the resources section.
+if ! otool -l dist/kokoro-server | grep -q __kokoro_res; then
+  echo "embedded resources section missing from the binary" >&2
   exit 1
 fi
 
@@ -60,8 +57,7 @@ fi
 # releases/latest/download URL never changes.
 NAME="kokoro-server-macos-arm64"
 BIN="dist/$NAME"
-mkdir -p dist
-cp .build/release/KokoroServer "$BIN"
+cp dist/kokoro-server "$BIN"
 shasum -a 256 "$BIN" | awk '{ print $1 }' > "$BIN.sha256"
 
 echo "==> staged assets:"
