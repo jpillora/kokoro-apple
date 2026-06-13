@@ -91,3 +91,16 @@ cd Server
 make dist
 # → dist/kokoro-server + dist/mlx.metallib (keep them side by side)
 ```
+
+## Installing a release
+
+Both files from the tarball must land in the same directory — the binary can
+be renamed, but `mlx.metallib` must keep its name. Without it the server
+exits at startup with instructions. No sudo needed with `~/.local/bin`:
+
+```sh
+tar -xzf kokoro-server-*-macos-arm64.tar.gz
+cd kokoro-server-*-macos-arm64
+cp kokoro-server mlx.metallib ~/.local/bin/
+kokoro-server --help
+```

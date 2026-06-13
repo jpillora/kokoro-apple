@@ -51,7 +51,69 @@ actor Synthesizer {
 
 @main
 struct KokoroServerMain {
+  static let usage = """
+  kokoro-server — Kokoro TTS over HTTP (MLX, Apple Silicon)
+
+  Usage: kokoro-server [--help]
+
+  Configuration is via environment variables:
+    KOKORO_MODEL_PATH   path to kokoro-v1_0.safetensors
+                        (default /tmp/kokoro-model/kokoro-v1_0.safetensors)
+    KOKORO_VOICES_PATH  path to voices.npz
+                        (default /tmp/KokoroTestApp/Resources/voices.npz)
+    KOKORO_HOST         bind address (default 127.0.0.1; set 0.0.0.0 to expose)
+    KOKORO_PORT         port (default 8080)
+    KOKORO_VOICE        default voice (default bm_fable)
+
+  Endpoints:
+    GET  /         browser playground
+    GET  /healthz  liveness
+    GET  /voices   voice names as JSON
+    POST /tts      {"text":"...","voice":"bm_fable","speed":1.0} -> audio/wav
+    GET  /tts?text=...&voice=...&speed=...                       -> audio/wav
+
+  mlx.metallib (the MLX GPU kernels, shipped in the release tarball) must sit
+  in the same directory as this binary.
+  """
+
+  /// MLX loads its GPU kernels at runtime from `mlx.metallib` next to the
+  /// executable (or a `mlx-swift_Cmlx.bundle` for Xcode-built apps). Check
+  /// up front so a stray binary fails with instructions instead of MLX's
+  /// "Failed to load the default metallib" abort.
+  static func metallibProblem() -> String? {
+    let fm = FileManager.default
+    guard let exe = Bundle.main.executableURL?.resolvingSymlinksInPath() else { return nil }
+    let dir = exe.deletingLastPathComponent()
+    var candidates = [
+      dir.appendingPathComponent("mlx.metallib"),
+      dir.appendingPathComponent("mlx-swift_Cmlx.bundle"),
+    ]
+    if let resources = Bundle.main.resourceURL {
+      candidates.append(resources.appendingPathComponent("mlx-swift_Cmlx.bundle"))
+    }
+    if candidates.contains(where: { fm.fileExists(atPath: $0.path) }) {
+      return nil
+    }
+    return """
+    Missing mlx.metallib (the MLX GPU kernels): expected next to this binary at
+      \(dir.path)/mlx.metallib
+    The release tarball ships it alongside kokoro-server — keep both files in
+    the same directory:
+      cp mlx.metallib '\(dir.path)/'
+    """
+  }
+
   static func main() async throws {
+    let args = CommandLine.arguments.dropFirst()
+    if args.contains("--help") || args.contains("-h") {
+      print(usage)
+      return
+    }
+    if let unknown = args.first {
+      fputs("unknown argument '\(unknown)'\n\n\(usage)\n", stderr)
+      exit(64)
+    }
+
     let env = ProcessInfo.processInfo.environment
     let modelPath = env["KOKORO_MODEL_PATH"] ?? "/tmp/kokoro-model/kokoro-v1_0.safetensors"
     let voicesPath = env["KOKORO_VOICES_PATH"] ?? "/tmp/KokoroTestApp/Resources/voices.npz"
@@ -67,6 +129,11 @@ struct KokoroServerMain {
     }
     guard fm.fileExists(atPath: voicesPath) else {
       fputs("Missing voices.npz at \(voicesPath) (set KOKORO_VOICES_PATH)\n", stderr)
+      exit(1)
+    }
+
+    if let problem = metallibProblem() {
+      fputs(problem + "\n", stderr)
       exit(1)
     }
 
