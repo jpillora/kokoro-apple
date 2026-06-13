@@ -1,5 +1,5 @@
 // swift-tools-version: 6.2
-// Companion package for the kokoro-ios fork: macOS executables (CLI demo and
+// Companion package for the kokoro-apple fork: macOS executables (CLI demo and
 // HTTP TTS server) plus shared helpers. Lives in its own package so the root
 // package stays byte-close to upstream (mlalma/kokoro-ios) and iOS consumers
 // of KokoroSwift never resolve server-only dependencies like FlyingFox.

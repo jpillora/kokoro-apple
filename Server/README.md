@@ -1,6 +1,6 @@
 # KokoroServer
 
-macOS executables for the [kokoro-ios](..) fork:
+macOS executables for the [kokoro-apple](..) fork:
 
 - **KokoroServer** — HTTP server exposing Kokoro TTS
 - **KokoroDemo** — one-shot CLI that writes a WAV file
