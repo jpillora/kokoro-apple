@@ -59,9 +59,9 @@ struct KokoroServerMain {
 
   Configuration is via environment variables:
     KOKORO_MODEL_PATH   path to kokoro-v1_0.safetensors
-                        (default /tmp/kokoro-model/kokoro-v1_0.safetensors)
+                        (default: in the state dir, auto-downloaded)
     KOKORO_VOICES_PATH  path to voices.npz
-                        (default /tmp/KokoroTestApp/Resources/voices.npz)
+                        (default: in the state dir, auto-downloaded)
     KOKORO_HOST         bind address (default 127.0.0.1; set 0.0.0.0 to expose)
     KOKORO_PORT         port (default 8080)
     KOKORO_VOICE        default voice (default bm_fable)
@@ -73,11 +73,74 @@ struct KokoroServerMain {
     POST /tts      {"text":"...","voice":"bm_fable","speed":1.0} -> audio/wav
     GET  /tts?text=...&voice=...&speed=...                       -> audio/wav
 
-  Release binaries embed the MLX GPU kernels and extract them to
-  $XDG_STATE_HOME/kokoro-apple (default ~/.local/state/kokoro-apple) on first
-  run. Development builds instead need mlx.metallib next to the binary
-  (see `make metallib`).
+  The state dir is $XDG_STATE_HOME/kokoro-apple (default
+  ~/.local/state/kokoro-apple). First run downloads the model (327 MB) and
+  voices (15 MB) there; release binaries also extract their embedded MLX GPU
+  kernels there. Development builds instead need mlx.metallib next to the
+  binary (see `make metallib`).
   """
+
+  static let modelSource =
+    URL(string: "https://huggingface.co/prince-canuma/Kokoro-82M/resolve/main/kokoro-v1_0.safetensors")!
+  static let voicesSource =
+    URL(string: "https://raw.githubusercontent.com/mlalma/KokoroTestApp/main/Resources/voices.npz")!
+
+  static func stateDir(env: [String: String]) -> URL {
+    let home = env["XDG_STATE_HOME"].map { URL(fileURLWithPath: $0) }
+      ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/state")
+    return home.appendingPathComponent("kokoro-apple")
+  }
+
+  /// Downloads `source` to `dest` unless it already exists. Streams to a
+  /// sibling temp file then renames, so an interrupted download never leaves
+  /// a half-written file behind. Exits with a manual-download hint on error.
+  static func ensureDownloaded(_ label: String, to dest: URL, from source: URL) async {
+    let fm = FileManager.default
+    if fm.fileExists(atPath: dest.path) { return }
+    let tmp = dest.appendingPathExtension("download-\(getpid())")
+    do {
+      try fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
+      print("Downloading \(label) from \(source.host ?? "?") to \(dest.path)")
+      let (bytes, response) = try await URLSession.shared.bytes(from: source)
+      guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+        throw URLError(.badServerResponse)
+      }
+      let expected = response.expectedContentLength
+      fm.createFile(atPath: tmp.path, contents: nil)
+      let handle = try FileHandle(forWritingTo: tmp)
+      defer { try? handle.close() }
+      var buffer = Data(capacity: 1 << 20)
+      var written: Int64 = 0
+      var lastBucket = -1
+      for try await byte in bytes {
+        buffer.append(byte)
+        if buffer.count >= 1 << 20 {
+          try handle.write(contentsOf: buffer)
+          written += Int64(buffer.count)
+          buffer.removeAll(keepingCapacity: true)
+          // Progress every 5% (or every 32 MB when the size is unknown).
+          let bucket = expected > 0 ? Int(written * 20 / expected) : Int(written >> 25)
+          if bucket != lastBucket {
+            lastBucket = bucket
+            let total = expected > 0 ? "/\(expected / 1_000_000)" : ""
+            print("  \(label): \(written / 1_000_000)\(total) MB")
+          }
+        }
+      }
+      try handle.write(contentsOf: buffer)
+      try handle.close()
+      if fm.fileExists(atPath: dest.path) {
+        try fm.removeItem(at: dest)
+      }
+      try fm.moveItem(at: tmp, to: dest)
+      print("Downloaded \(label)")
+    } catch {
+      try? fm.removeItem(at: tmp)
+      fputs("Failed to download \(label): \(error.localizedDescription)\n", stderr)
+      fputs("Fetch it manually:\n  curl -L -o '\(dest.path)' '\(source.absoluteString)'\n", stderr)
+      exit(1)
+    }
+  }
 
   /// MLX loads its GPU kernels (a `.metallib`) at runtime; it searches for
   /// `mlx.metallib` next to the executable, then a `mlx-swift_Cmlx.bundle`
@@ -110,9 +173,7 @@ struct KokoroServerMain {
       """
     }
 
-    let stateHome = env["XDG_STATE_HOME"].map { URL(fileURLWithPath: $0) }
-      ?? fm.homeDirectoryForCurrentUser.appendingPathComponent(".local/state")
-    let stateDir = stateHome.appendingPathComponent("kokoro-apple")
+    let stateDir = Self.stateDir(env: env)
     let lib = stateDir.appendingPathComponent("mlx.metallib")
     // MLX's working-directory fallback looks for this exact name.
     let alias = stateDir.appendingPathComponent("default.metallib")
@@ -159,6 +220,9 @@ struct KokoroServerMain {
   }
 
   static func main() async throws {
+    // Keep logs timely when stdout is a pipe or file (launchd, tee, ...).
+    setvbuf(stdout, nil, _IOLBF, 0)
+
     let args = CommandLine.arguments.dropFirst()
     if args.contains("--help") || args.contains("-h") {
       print(usage)
@@ -170,8 +234,11 @@ struct KokoroServerMain {
     }
 
     let env = ProcessInfo.processInfo.environment
-    let modelPath = env["KOKORO_MODEL_PATH"] ?? "/tmp/kokoro-model/kokoro-v1_0.safetensors"
-    let voicesPath = env["KOKORO_VOICES_PATH"] ?? "/tmp/KokoroTestApp/Resources/voices.npz"
+    let state = stateDir(env: env)
+    let modelPath = env["KOKORO_MODEL_PATH"]
+      ?? state.appendingPathComponent("kokoro-v1_0.safetensors").path
+    let voicesPath = env["KOKORO_VOICES_PATH"]
+      ?? state.appendingPathComponent("voices.npz").path
     let host = env["KOKORO_HOST"] ?? "127.0.0.1"
     let port = UInt16(env["KOKORO_PORT"] ?? "8080") ?? 8080
     let defaultVoice = env["KOKORO_VOICE"] ?? "bm_fable"
@@ -181,16 +248,8 @@ struct KokoroServerMain {
     let modelURL = URL(fileURLWithPath: modelPath).standardizedFileURL
     let voicesURL = URL(fileURLWithPath: voicesPath).standardizedFileURL
 
-    let fm = FileManager.default
-    guard fm.fileExists(atPath: modelURL.path) else {
-      fputs("Missing model at \(modelURL.path) (set KOKORO_MODEL_PATH)\n", stderr)
-      fputs("Download with:\n  curl -L -o '\(modelURL.path)' 'https://huggingface.co/prince-canuma/Kokoro-82M/resolve/main/kokoro-v1_0.safetensors'\n", stderr)
-      exit(1)
-    }
-    guard fm.fileExists(atPath: voicesURL.path) else {
-      fputs("Missing voices.npz at \(voicesURL.path) (set KOKORO_VOICES_PATH)\n", stderr)
-      exit(1)
-    }
+    await ensureDownloaded("model (327 MB)", to: modelURL, from: modelSource)
+    await ensureDownloaded("voices (15 MB)", to: voicesURL, from: voicesSource)
 
     if let problem = ensureMetallib(env: env) {
       fputs(problem + "\n", stderr)

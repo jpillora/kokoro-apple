@@ -12,16 +12,11 @@ and iOS consumers of `KokoroSwift` never resolve server-only dependencies.
 
 ## Setup
 
-Model and voices are not bundled; download once:
-
-```sh
-mkdir -p /tmp/kokoro-model
-curl -L -o /tmp/kokoro-model/kokoro-v1_0.safetensors \
-  'https://huggingface.co/prince-canuma/Kokoro-82M/resolve/main/kokoro-v1_0.safetensors'
-git clone --depth 1 https://github.com/mlalma/KokoroTestApp /tmp/KokoroTestApp
-```
-
-(Or put them anywhere and set `KOKORO_MODEL_PATH` / `KOKORO_VOICES_PATH`.)
+None — on first run the server downloads the model (327 MB, Hugging Face)
+and voices (15 MB) into `$XDG_STATE_HOME/kokoro-apple` (default
+`~/.local/state/kokoro-apple`), alongside the extracted GPU kernels.
+Existing files are reused; point `KOKORO_MODEL_PATH` / `KOKORO_VOICES_PATH`
+elsewhere to override.
 
 ## Metal shaders (one-time)
 
@@ -44,8 +39,8 @@ swift run -c release KokoroServer
 
 | Env var | Default |
 | --- | --- |
-| `KOKORO_MODEL_PATH` | `/tmp/kokoro-model/kokoro-v1_0.safetensors` |
-| `KOKORO_VOICES_PATH` | `/tmp/KokoroTestApp/Resources/voices.npz` |
+| `KOKORO_MODEL_PATH` | `~/.local/state/kokoro-apple/kokoro-v1_0.safetensors` (auto-downloaded) |
+| `KOKORO_VOICES_PATH` | `~/.local/state/kokoro-apple/voices.npz` (auto-downloaded) |
 | `KOKORO_HOST` | `127.0.0.1` (set `0.0.0.0` to expose) |
 | `KOKORO_PORT` | `8080` |
 | `KOKORO_VOICE` | `bm_fable` (default voice) |
