@@ -41,6 +41,9 @@ let package = Package(
         "KokoroKit",
         .product(name: "KokoroSwift", package: "KokoroSwift"),
         .product(name: "FlyingFox", package: "FlyingFox"),
+        // FlyingSocks (same package as FlyingFox) provides AsyncBufferedSequence,
+        // which the SSE streaming body conforms to.
+        .product(name: "FlyingSocks", package: "FlyingFox"),
         .product(name: "MLX", package: "mlx-swift"),
       ]
     ),

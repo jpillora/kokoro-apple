@@ -34,6 +34,37 @@ import Testing
     let chunks = TextChunker.split("First paragraph here.\n\nSecond paragraph here.")
     #expect(chunks == ["First paragraph here.", "Second paragraph here."])
   }
+
+  @Test func streamingFirstChunkIsSmallThenRamps() {
+    let sentence = "the quick brown fox jumps over the lazy dog near the wide river"  // 13 words
+    let text = Array(repeating: sentence, count: 12).joined(separator: ", ") + "."
+    let chunks = TextChunker.splitStreaming(text, firstChunkWords: 8, maxWordsPerChunk: 40)
+    #expect(chunks.count > 1)
+    // First chunk is small (fast first audio): never more than firstChunkWords.
+    #expect(chunks[0].split(separator: " ").count <= 8)
+    // Chunks grow: the last is larger than the first.
+    let lastWords = chunks.last!.split(separator: " ").count
+    #expect(lastWords > chunks[0].split(separator: " ").count)
+    // No chunk exceeds the cap, and no words are lost.
+    for chunk in chunks {
+      #expect(chunk.split(separator: " ").count <= 40)
+    }
+    #expect(chunks.joined(separator: " ").split(separator: " ").count
+      == text.split(separator: " ").count)
+  }
+
+  @Test func streamingBreaksAtClauseBoundary() {
+    // A comma falls exactly at the 8-word cap, so the first chunk stops there.
+    let chunks = TextChunker.splitStreaming(
+      "One two three four five six seven eight, nine ten eleven twelve thirteen fourteen.",
+      firstChunkWords: 8
+    )
+    #expect(chunks.first == "One two three four five six seven eight,")
+  }
+
+  @Test func streamingEmptyText() {
+    #expect(TextChunker.splitStreaming("") == [])
+  }
 }
 
 @Suite struct WavEncoderTests {

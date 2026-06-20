@@ -12,6 +12,19 @@ struct TTSParams: Decodable {
   var speed: Float?
 }
 
+/// OpenAI's `POST /v1/audio/speech` request body. Property names match the
+/// snake_case JSON, so no `CodingKeys` are needed. `model` and `instructions`
+/// are accepted but ignored — Kokoro is the only model and has no style prompt.
+struct OpenAISpeechRequest: Decodable {
+  let input: String
+  var model: String?
+  var voice: String?
+  var response_format: String?
+  var speed: Float?
+  var instructions: String?
+  var stream_format: String?
+}
+
 enum TTSError: Error, CustomStringConvertible {
   case unknownVoice(String)
 
@@ -49,6 +62,28 @@ actor Synthesizer {
     }
     return samples
   }
+
+  /// Like `synthesize`, but hands each chunk's samples to `onChunk` as soon as
+  /// it is generated, so callers can stream (SSE). Uses `splitStreaming` for a
+  /// small, fast first chunk and emits chunks back-to-back with no inter-chunk
+  /// silence — the goal is the lowest possible time-to-first-sound, and clause
+  /// breaks should not become audible pauses. `onChunk` runs synchronously
+  /// inside the actor and must not block, so MLX stays serialized with no
+  /// re-entrancy mid-generation.
+  func synthesizeStreaming(
+    text: String, voiceName: String, speed: Float,
+    onChunk: @Sendable ([Float]) -> Void
+  ) throws {
+    guard let voice = voices[voiceName] else {
+      throw TTSError.unknownVoice(voiceName)
+    }
+    let language: Language = voiceName.first == "a" ? .enUS : .enGB
+    for chunk in TextChunker.splitStreaming(text) {
+      try Task.checkCancellation()
+      let (chunkSamples, _) = try tts.generateAudio(voice: voice, language: language, text: chunk, speed: speed)
+      onChunk(chunkSamples)
+    }
+  }
 }
 
 @main
@@ -66,13 +101,18 @@ struct KokoroServerMain {
     KOKORO_HOST         bind address (default 127.0.0.1; set 0.0.0.0 to expose)
     KOKORO_PORT         port (default 8080)
     KOKORO_VOICE        default voice (default bm_fable)
+    KOKORO_API_KEY      if set, /v1 routes require this bearer token
 
   Endpoints:
-    GET  /         browser playground
-    GET  /healthz  liveness
-    GET  /voices   voice names as JSON
-    POST /tts      {"text":"...","voice":"bm_fable","speed":1.0} -> audio/wav
-    GET  /tts?text=...&voice=...&speed=...                       -> audio/wav
+    GET  /                  browser playground
+    GET  /healthz           liveness
+    GET  /voices            voice names as JSON
+    POST /tts               {"text":"...","voice":"bm_fable","speed":1.0} -> audio/wav
+    GET  /tts?text=...&voice=...&speed=...                                -> audio/wav
+    POST /v1/audio/speech   OpenAI-compatible: {"model","input","voice",
+                            "response_format":wav|pcm|aac|flac,"speed",
+                            "stream_format":audio|sse}. mp3/opus -> 400.
+    GET  /v1/models         OpenAI-compatible model list
 
   The state dir is $XDG_STATE_HOME/kokoro-apple (default
   ~/.local/state/kokoro-apple). Release binaries extract their embedded
@@ -300,6 +340,8 @@ struct KokoroServerMain {
     let host = env["KOKORO_HOST"] ?? "127.0.0.1"
     let port = UInt16(env["KOKORO_PORT"] ?? "8080") ?? 8080
     let defaultVoice = env["KOKORO_VOICE"] ?? "bm_fable"
+    // When set, the OpenAI-compatible /v1 routes require this bearer token.
+    let apiKey = env["KOKORO_API_KEY"]
 
     // Absolutize now, against the launch cwd, before ensureResources may chdir.
     let modelURL = URL(fileURLWithPath: modelPath).standardizedFileURL.absoluteURL
@@ -333,7 +375,7 @@ struct KokoroServerMain {
 
     let cors: HTTPHeaders = [
       HTTPHeader(rawValue: "Access-Control-Allow-Origin"): "*",
-      HTTPHeader(rawValue: "Access-Control-Allow-Headers"): "Content-Type",
+      HTTPHeader(rawValue: "Access-Control-Allow-Headers"): "Content-Type, Authorization",
     ]
 
     @Sendable func json(_ status: HTTPStatusCode, _ object: some Encodable & Sendable) -> HTTPResponse {
@@ -367,6 +409,70 @@ struct KokoroServerMain {
       }
     }
 
+    // --- OpenAI-compatible surface: POST /v1/audio/speech ---
+
+    /// Errors on the /v1 routes use OpenAI's `{"error":{message,type,code}}`
+    /// envelope so the OpenAI SDK surfaces them as typed exceptions.
+    @Sendable func openAIError(
+      _ status: HTTPStatusCode, _ message: String, _ type: String = "invalid_request_error"
+    ) -> HTTPResponse {
+      func esc(_ s: String) -> String {
+        s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+      }
+      let body = "{\"error\":{\"message\":\"\(esc(message))\",\"type\":\"\(type)\",\"code\":null}}"
+      var headers = cors
+      headers[.contentType] = "application/json"
+      return HTTPResponse(statusCode: status, headers: headers, body: Data(body.utf8))
+    }
+
+    // OpenAI voice names → a Kokoro voice that exists in voices.npz.
+    // alloy/echo/fable/onyx/nova are near-exact (af_alloy, am_echo, …); the
+    // rest are sensible picks by rough gender.
+    let openAIVoiceMap: [String: String] = [
+      "alloy": "af_alloy", "echo": "am_echo", "fable": "bm_fable", "onyx": "am_onyx",
+      "nova": "af_nova", "verse": "am_michael", "sage": "bf_emma", "shimmer": "af_bella",
+      "ash": "am_adam", "ballad": "bm_george", "coral": "af_sarah", "marin": "af_nicole",
+      "cedar": "bm_lewis",
+    ]
+    let voiceSet = Set(synthesizer.voiceNames)
+    /// Resolves a requested voice to a Kokoro voice name: a native name passes
+    /// through, an OpenAI name maps (falling back to the default if its target
+    /// is missing), and anything else returns nil (→ 400). nil/empty → default.
+    @Sendable func resolveVoice(_ requested: String?) -> String? {
+      guard let v = requested, !v.isEmpty else { return defaultVoice }
+      if voiceSet.contains(v) { return v }
+      if let mapped = openAIVoiceMap[v.lowercased()] {
+        return voiceSet.contains(mapped) ? mapped : defaultVoice
+      }
+      return nil
+    }
+
+    /// Builds a progressive `text/event-stream` response: one `speech.audio.delta`
+    /// (Base64 PCM) per sentence as Kokoro renders it, then a `speech.audio.done`.
+    @Sendable func sseResponse(text: String, voiceName: String, speed: Float) -> HTTPResponse {
+      let (stream, continuation) = AsyncThrowingStream<[UInt8], Error>.makeStream()
+      let inputTokens = text.split(whereSeparator: { $0 == " " || $0 == "\n" || $0 == "\t" }).count
+      let task = Task {
+        do {
+          try await synthesizer.synthesizeStreaming(text: text, voiceName: voiceName, speed: speed) { samples in
+            continuation.yield(sseAudioDelta(base64: AudioEncoder.pcmS16LE(samples: samples).base64EncodedString()))
+          }
+          continuation.yield(sseAudioDone(inputTokens: inputTokens))
+          continuation.finish()
+        } catch is CancellationError {
+          continuation.finish()
+        } catch {
+          continuation.yield(sseError("synthesis failed"))
+          continuation.finish()
+        }
+      }
+      continuation.onTermination = { _ in task.cancel() }
+      var headers = cors
+      headers[.contentType] = "text/event-stream"
+      headers[HTTPHeader(rawValue: "Cache-Control")] = "no-cache"
+      return HTTPResponse(statusCode: .ok, headers: headers, body: HTTPBodySequence(from: SSEBody(stream: stream)))
+    }
+
     let server = HTTPServer(address: try .inet(ip4: host, port: port))
 
     await server.appendRoute("GET /healthz") { _ in
@@ -394,6 +500,67 @@ struct KokoroServerMain {
         speed: request.query["speed"].flatMap(Float.init)
       )
       return await synthesize(params)
+    }
+
+    await server.appendRoute("POST /v1/audio/speech") { request in
+      if let apiKey {
+        let auth = request.headers[.authorization] ?? ""
+        guard auth == "Bearer \(apiKey)" else {
+          return openAIError(.unauthorized, "Incorrect API key provided")
+        }
+      }
+      guard let req = try? await JSONDecoder().decode(OpenAISpeechRequest.self, from: request.bodyData) else {
+        return openAIError(.badRequest, #"invalid request body; expected JSON like {"model":"tts-1","input":"hello","voice":"alloy"}"#)
+      }
+      let input = req.input.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !input.isEmpty else { return openAIError(.badRequest, "missing 'input'") }
+      guard let voiceName = resolveVoice(req.voice) else {
+        return openAIError(.badRequest, "unknown voice '\(req.voice ?? "")' — see GET /voices, or use an OpenAI voice name")
+      }
+      guard let format = AudioEncoder.Format(openAIName: req.response_format ?? "wav") else {
+        return openAIError(.badRequest, "unsupported response_format '\(req.response_format ?? "")'; supported: wav, pcm, aac, flac")
+      }
+      let speed = min(4.0, max(0.25, req.speed ?? 1.0))
+      let streamFormat = req.stream_format ?? "audio"
+
+      if streamFormat == "sse" {
+        guard format == .pcm || format == .wav else {
+          return openAIError(.badRequest, "stream_format 'sse' supports only response_format pcm or wav")
+        }
+        return sseResponse(text: input, voiceName: voiceName, speed: speed)
+      }
+      guard streamFormat == "audio" else {
+        return openAIError(.badRequest, "unknown stream_format '\(streamFormat)'; supported: audio, sse")
+      }
+
+      let start = Date()
+      do {
+        let samples = try await synthesizer.synthesize(text: input, voiceName: voiceName, speed: speed)
+        guard let bytes = AudioEncoder.encode(
+          samples: samples, sampleRate: KokoroTTS.Constants.samplingRate, format: format
+        ) else {
+          return openAIError(.internalServerError, "failed to encode audio as \(format.rawValue)", "server_error")
+        }
+        let audioSeconds = Double(samples.count) / Double(KokoroTTS.Constants.samplingRate)
+        print("v1/speech voice=\(voiceName) fmt=\(format.rawValue) chars=\(input.count) audio=\(String(format: "%.2f", audioSeconds))s took=\(String(format: "%.2f", Date().timeIntervalSince(start)))s")
+        var headers = cors
+        headers[.contentType] = format.contentType
+        return HTTPResponse(statusCode: .ok, headers: headers, body: bytes)
+      } catch let error as TTSError {
+        return openAIError(.badRequest, "\(error)")
+      } catch {
+        return openAIError(.internalServerError, "synthesis failed: \(error)", "server_error")
+      }
+    }
+
+    // Minimal models list so OpenAI clients that call it (e.g. client.models.list)
+    // succeed; the speech endpoint ignores `model`.
+    await server.appendRoute("GET /v1/models") { _ in
+      let models = ["tts-1", "tts-1-hd", "gpt-4o-mini-tts", "kokoro"]
+      let data = models.map { "{\"id\":\"\($0)\",\"object\":\"model\",\"owned_by\":\"kokoro\"}" }.joined(separator: ",")
+      var headers = cors
+      headers[.contentType] = "application/json"
+      return HTTPResponse(statusCode: .ok, headers: headers, body: Data("{\"object\":\"list\",\"data\":[\(data)]}".utf8))
     }
 
     await server.appendRoute("OPTIONS *") { _ in
