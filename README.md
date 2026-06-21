@@ -1,5 +1,12 @@
 # Kokoro TTS for Swift
 
+> **Fork note** — [`jpillora/kokoro-apple`](https://github.com/jpillora/kokoro-apple) adds a
+> self-contained **macOS TTS server with an OpenAI-compatible API** (`POST /v1/audio/speech`,
+> including streaming) on top of upstream KokoroSwift. See **[`Server/`](Server/README.md)** for
+> docs, or download a prebuilt binary from
+> [releases](https://github.com/jpillora/kokoro-apple/releases/latest). Everything below is the
+> unchanged upstream library README.
+
 ✨ *New in 1.0.8:* Added timestamps for each token. Please check [Kokoro Test App](https://github.com/mlalma/KokoroTestApp) how to use them.
 
 ✨ *New in 1.0.5:* Voice styles are moved out of the library to the integrating application. Please check [Kokoro Test App](https://github.com/mlalma/KokoroTestApp) how to use them.
